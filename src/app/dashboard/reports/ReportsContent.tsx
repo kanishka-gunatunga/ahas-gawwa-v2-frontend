@@ -1,0 +1,183 @@
+"use client";
+
+import { useState } from "react";
+import {
+  Filter,
+  Calendar,
+  Building,
+} from "lucide-react";
+import DashboardPageHeader from "@/components/dashboard/DashboardPageHeader";
+import { useGetAllBranches } from "@/hooks/useBranch";
+
+export type ReportType =
+  | "sales"
+  | "inventory"
+  | "user_activity"
+  | "order_summary"
+  | "payment"
+  | "product_performance"
+  | "branch_performance"
+  | "discount_usage";
+
+const REPORT_TYPES: { id: ReportType; label: string }[] = [
+  { id: "sales", label: "Sales Report" },
+  { id: "inventory", label: "Inventory Report" },
+  { id: "user_activity", label: "User Activity Report" },
+  { id: "order_summary", label: "Order Summary Report" },
+  { id: "payment", label: "Payment Report" },
+  { id: "product_performance", label: "Product Performance Report" },
+  { id: "branch_performance", label: "Branch Performance Report" },
+  { id: "discount_usage", label: "Discount Usage Report" },
+];
+
+export default function ReportsContent() {
+  const { data: branches = [], isLoading: branchesLoading } = useGetAllBranches("all");
+  const [selectedReport, setSelectedReport] = useState<ReportType>("sales");
+  const [fromDate, setFromDate] = useState(() => {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), 1);
+    return start.toISOString().slice(0, 10);
+  });
+  const [toDate, setToDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [branch, setBranch] = useState("all");
+  const [isGenerating, setIsGenerating] = useState(false);
+
+  const branchSelectValue =
+    branch === "all" || branches.some((b) => String(b.id) === branch)
+      ? branch
+      : "all";
+
+  const handleGenerateReport = () => {
+    setIsGenerating(true);
+    // Simulate report generation - in production this would call an API
+    setTimeout(() => {
+      setIsGenerating(false);
+    }, 1500);
+  };
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#F8FAFC]">
+      <DashboardPageHeader />
+      <div className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
+        <div className="space-y-6">
+          {/* Header */}
+          <div>
+            <h1 className="font-['Inter'] text-[30px] font-bold leading-9 text-[#1D293D]">
+              Reports
+            </h1>
+            <p className="mt-1 font-['Inter'] text-[16px] font-normal leading-6 text-[#62748E]">
+              Performance reports with real-time metrics and insights
+            </p>
+          </div>
+
+          {/* Report Configuration */}
+          <div className="flex w-full flex-col gap-4 rounded-[24px] border border-[#E2E8F0] bg-white p-6 shadow-[0px_1px_2px_-1px_#0000001A,0px_1px_3px_0px_#0000001A]">
+            <div className="flex items-center gap-2">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[14px] bg-[#DBEAFE]">
+                <Filter className="h-4 w-4 text-[#155DFC]" />
+              </div>
+              <span className="font-['Inter'] text-[20px] font-bold leading-7 text-[#1D293D]">
+                Report Configuration
+              </span>
+            </div>
+
+            <div className="rounded-[18px] bg-[#F8FAFC] p-4">
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:gap-6">
+                <div className="min-w-0 flex-1">
+                  <label className="mb-1.5 block font-['Inter'] text-[12px] font-bold uppercase leading-4 text-[#45556C]">
+                    Select Report
+                  </label>
+                  <div className="relative">
+                    <select
+                      value={selectedReport}
+                      onChange={(e) => setSelectedReport(e.target.value as ReportType)}
+                      className="h-11 w-full appearance-none rounded-[14px] border-2 border-[#E2E8F0] bg-white px-4 pr-10 text-[14px] text-[#1D293D] outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10"
+                    >
+                      {REPORT_TYPES.map((r) => (
+                        <option key={r.id} value={r.id}>
+                          {r.label}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#90A1B9]">
+                      ▼
+                    </span>
+                  </div>
+                </div>
+
+                <div className="min-w-0 flex-1">
+                  <label className="mb-1.5 block font-['Inter'] text-[12px] font-bold uppercase leading-4 text-[#45556C]">
+                    Select Date Range
+                  </label>
+                  <div className="relative">
+                    <Calendar className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#90A1B9]" />
+                    <div className="flex h-11 w-full items-center gap-2 rounded-[14px] border-2 border-[#E2E8F0] bg-white pl-10 pr-3">
+                      <input
+                        type="date"
+                        value={fromDate}
+                        onChange={(e) => setFromDate(e.target.value)}
+                        className="min-w-0 flex-1 bg-transparent text-[14px] text-[#1D293D] outline-none"
+                        aria-label="From date"
+                      />
+                      <span className="text-[#90A1B9]">—</span>
+                      <input
+                        type="date"
+                        value={toDate}
+                        onChange={(e) => setToDate(e.target.value)}
+                        className="min-w-0 flex-1 bg-transparent text-[14px] text-[#1D293D] outline-none"
+                        aria-label="To date"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="min-w-0 flex-1">
+                  <label className="mb-1.5 block font-['Inter'] text-[12px] font-bold uppercase leading-4 text-[#45556C]">
+                    Branch
+                  </label>
+                  <div className="relative">
+                    <Building className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#90A1B9]" />
+                    <select
+                      value={branchSelectValue}
+                      onChange={(e) => setBranch(e.target.value)}
+                      disabled={branchesLoading}
+                      className="h-11 w-full appearance-none rounded-[14px] border-2 border-[#E2E8F0] bg-white pl-10 pr-10 text-[14px] text-[#1D293D] outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <option value="all">
+                        {branchesLoading ? "Loading branches…" : "All Branches"}
+                      </option>
+                      {branches.map((b) => (
+                        <option key={b.id} value={String(b.id)}>
+                          {b.name}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#90A1B9]">
+                      ▼
+                    </span>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleGenerateReport}
+                  disabled={isGenerating}
+                  className="h-11 w-full flex-1 rounded-[14px] bg-[#EA580C] px-6 font-['Inter'] text-[14px] font-bold leading-5 text-white shadow-[0px_4px_6px_-4px_#EA580C33,0px_10px_15px_-3px_#EA580C33] transition-all hover:bg-primary-hover active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  {isGenerating ? (
+                    <span className="flex items-center justify-center gap-2">
+                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                      Generating...
+                    </span>
+                  ) : (
+                    "Generate Report"
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
