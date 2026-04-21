@@ -1,7 +1,7 @@
 "use client";
 
 import { AxiosError } from "axios";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useRef } from "react";
 import MenuProductImage from "./MenuProductImage";
 import { toast } from "sonner";
 import { User, Phone, ChefHat, Trash2, X } from "lucide-react";
@@ -17,7 +17,7 @@ import {
 } from "@/hooks/useDiscount";
 import NewOrderDetailsModal from "./NewOrderDetailsModal";
 import ProcessPaymentModal from "./ProcessPaymentModal";
-import type { OrderDetailsData, OrderItem } from "@/contexts/OrderContext";
+import type { OrderDetailsData, OrderItem, OrderDetailsModalMode } from "@/contexts/OrderContext";
 import type { CreateOrderData, Order } from "@/types/order";
 import {
   buildCreatePaymentDraftFromOrder,
@@ -34,11 +34,22 @@ import {
 type NoteModalType = "kitchen" | "order" | null;
 type PaymentFlowState = {
   customerName: string;
+  customerMobile?: string;
   settlementAmount: number;
-  orderId: number;
+  orderId?: number;
   localOrderId?: string;
 };
 const PENDING_PAYMENT_STORAGE_KEY = "pos_pending_payment_flow";
+
+const isVoucherLineItem = (item: OrderItem): boolean => {
+  if (item.itemType === "voucher") return true;
+  if (item.itemType === "food") return false;
+  const name = item.name.toLowerCase();
+  return name.includes("voucher") || name.includes("gift voucher");
+};
+
+const isMockOnlyLineItem = (item: OrderItem): boolean =>
+  item.itemType === "voucher" || item.itemType === "promotion";
 
 function loadPendingPaymentFlow(): PaymentFlowState | null {
   if (typeof window === "undefined") return null;
@@ -55,6 +66,7 @@ function loadPendingPaymentFlow(): PaymentFlowState | null {
     if (typeof parsed.customerName === "string" && settlement != null && typeof parsed.orderId === "number") {
       return {
         customerName: parsed.customerName,
+        ...(typeof parsed.customerMobile === "string" ? { customerMobile: parsed.customerMobile } : {}),
         settlementAmount: settlement,
         orderId: parsed.orderId,
         ...(typeof parsed.localOrderId === "string" && parsed.localOrderId
@@ -166,9 +178,14 @@ export default function OrderSidebar({ onEditItem }: { onEditItem?: (item: Order
     clearOrderById,
     clearCheckoutSession,
     setCheckoutLockedOrderSlotId,
+    registerOpenOrderDetails,
+    flushPendingAddsAfterOrderDetails,
+    clearPendingAddsAfterOrderDetails,
   } = useOrder();
 
   const [editOrderId, setEditOrderId] = useState<string | null>(null);
+  const [orderDetailsModalMode, setOrderDetailsModalMode] =
+    useState<OrderDetailsModalMode>("full");
   const [noteModal, setNoteModal] = useState<NoteModalType>(null);
   const [paymentFlow, setPaymentFlow] = useState<PaymentFlowState | null>(null);
   const [pendingPaymentOrder, setPendingPaymentOrder] = useState<PaymentFlowState | null>(() =>
@@ -181,6 +198,14 @@ export default function OrderSidebar({ onEditItem }: { onEditItem?: (item: Order
     const p = loadPendingPaymentFlow();
     if (p?.localOrderId) setCheckoutLockedOrderSlotId(p.localOrderId);
   }, [setCheckoutLockedOrderSlotId]);
+
+  useLayoutEffect(() => {
+    registerOpenOrderDetails((mode) => {
+      setOrderDetailsModalMode(mode);
+      setEditOrderId(activeOrderId);
+    });
+    return () => registerOpenOrderDetails(null);
+  }, [activeOrderId, registerOpenOrderDetails]);
 
   useEffect(() => {
     const p = pendingPaymentOrder;
@@ -204,7 +229,7 @@ export default function OrderSidebar({ onEditItem }: { onEditItem?: (item: Order
     return () => {
       cancelled = true;
     };
-  }, [pendingPaymentOrder?.orderId, pendingPaymentOrder?.localOrderId, clearCheckoutSession]);
+  }, [pendingPaymentOrder, pendingPaymentOrder?.orderId, pendingPaymentOrder?.localOrderId, clearCheckoutSession]);
 
   const { data: discountsData } = useGetAllDiscounts({ status: "active" });
   const discounts = discountsData || [];
@@ -212,12 +237,13 @@ export default function OrderSidebar({ onEditItem }: { onEditItem?: (item: Order
   const orderDetails = activeOrderDetails;
   const orderLabel = "Current Order";
   const hasDetails = orderDetails !== null;
-  const showModal = editOrderId === activeOrderId;
+  const showModal = editOrderId != null && activeOrderId != null && editOrderId === activeOrderId;
   const hasPendingPayment = !!pendingPaymentOrder;
 
   const handleOrderDetailsSubmit = (data: OrderDetailsData) => {
     setActiveOrderDetails(data);
     setEditOrderId(null);
+    flushPendingAddsAfterOrderDetails();
   };
 
   const itemsWithDiscounts = items.map((item) => {
@@ -241,6 +267,10 @@ export default function OrderSidebar({ onEditItem }: { onEditItem?: (item: Order
   const subtotalBeforeDiscount = itemsWithDiscounts.reduce((sum, i) => sum + i.price * i.qty, 0);
   const totalItemDiscount = itemsWithDiscounts.reduce((sum, i) => sum + i.discountAmount, 0);
   const subtotal = subtotalBeforeDiscount - totalItemDiscount;
+  const hasVoucherItems = items.some((item) => isVoucherLineItem(item));
+  const hasFoodItems = items.some((item) => !isVoucherLineItem(item));
+  const isVoucherOnlyOrder = hasVoucherItems && !hasFoodItems;
+  const hasMockOnlyItems = items.some((item) => isMockOnlyLineItem(item));
   const cartTaxAmount = 0;
   const serviceChargeBranchId = user?.branchId ?? null;
   const { data: serviceChargeSetting } = useServiceCharge(serviceChargeBranchId);
@@ -249,11 +279,11 @@ export default function OrderSidebar({ onEditItem }: { onEditItem?: (item: Order
     ? serviceChargePercentageRaw
     : 0;
   const serviceChargeAmount =
-    orderDetails?.orderType === "Dine In"
+    !isVoucherOnlyOrder && orderDetails?.orderType === "Dine In"
       ? Number((subtotal * (serviceChargePercentage / 100)).toFixed(2))
       : 0;
   const deliveryChargeAmount =
-    orderDetails?.orderType === "Delivery"
+    !isVoucherOnlyOrder && orderDetails?.orderType === "Delivery"
       ? Number(orderDetails.deliveryChargeAmount ?? 0)
       : 0;
   const total = subtotal + cartTaxAmount + serviceChargeAmount + deliveryChargeAmount;
@@ -272,18 +302,29 @@ export default function OrderSidebar({ onEditItem }: { onEditItem?: (item: Order
     }
     orderSubmitLockRef.current = true;
 
-    const normalizedName = orderDetails.customerName.trim();
-
-    const buildFingerprint = () => {
-      const line = itemsWithDiscounts
-        .map((i) => `${i.productId}|${i.id}|${i.qty}|${i.price}`)
-        .sort()
-        .join(";");
-      return `${line}@t${total.toFixed(2)}@p${orderDetails.phone.trim()}@${normalizedName}@${orderDetails.orderType}`;
-    };
-
     try {
       setCheckoutLockedOrderSlotId(localSlotId);
+
+      const normalizedName = orderDetails.customerName.trim();
+      const total = subtotal + cartTaxAmount + serviceChargeAmount + deliveryChargeAmount;
+
+      const buildFingerprint = () => {
+        const line = itemsWithDiscounts
+          .map((i) => `${i.productId}|${i.id}|${i.qty}|${i.price}`)
+          .sort()
+          .join(";");
+        const orderTypeForFingerprint = isVoucherOnlyOrder ? "voucher_only" : orderDetails.orderType;
+        return `${line}@t${total.toFixed(2)}@p${orderDetails.phone.trim()}@${normalizedName}@${orderTypeForFingerprint}`;
+      };
+
+      if (hasMockOnlyItems) {
+        if (!isPayNow) {
+          clearOrderById(localSlotId);
+          setCheckoutLockedOrderSlotId(null);
+          toast.success("Mock order completed (frontend only).");
+        }
+        return null;
+      }
 
       const fp = buildFingerprint();
       const open = readMenuOpenCheckout();
@@ -340,33 +381,14 @@ export default function OrderSidebar({ onEditItem }: { onEditItem?: (item: Order
         }
       }
 
-      const payload: CreateOrderData = {
-        customerName: normalizedName,
-        customerMobile: orderDetails.phone,
-        customerId: orderDetails.customerId,
-        totalAmount: total,
-        orderType:
-          orderDetails.orderType === "Dine In"
-            ? "dining"
-            : orderDetails.orderType === "Take Away"
-              ? "takeaway"
-              : "delivery",
-        tableNumber: orderDetails.tableNumber,
-        orderDiscount: 0,
-        tax: cartTaxAmount,
-        orderNote: activeOrderNote,
-        kitchenNote: activeKitchenNote,
-        deliveryAddress: orderDetails.deliveryAddress,
-        landmark: orderDetails.landmark,
-        zipcode: orderDetails.zipCode,
-        deliveryInstructions: orderDetails.deliveryInstructions,
-        serviceCharge: serviceChargeAmount,
-        deliveryChargeAmount,
-        deliveryChargeId:
-          orderDetails.orderType === "Delivery" ? (orderDetails.deliveryChargeId ?? null) : null,
-        deliveryChargeSelectedId:
-          orderDetails.orderType === "Delivery" ? (orderDetails.deliveryChargeId ?? null) : null,
-        order_products: items.map((item) => {
+      const resolvedOrderType =
+        orderDetails.orderType === "Dine In"
+          ? "dining"
+          : orderDetails.orderType === "Take Away"
+            ? "takeaway"
+            : "delivery";
+
+      const orderProductsPayload = items.map((item) => {
           const modificationUnitSum = (item.modifications ?? []).reduce(
             (sum, m) => sum + Number(m.price || 0),
             0
@@ -374,48 +396,92 @@ export default function OrderSidebar({ onEditItem }: { onEditItem?: (item: Order
           const baseUnitPrice = Math.max(0, Number(item.price) - modificationUnitSum);
           return {
             productId: item.productId,
+            variationId: item.variationId,
             variationOptionId: item.variationOptionId,
             quantity: item.qty,
             unitPrice: Number(baseUnitPrice.toFixed(2)),
-          productDiscount:
-            (itemsWithDiscounts.find((i) => i.id === item.id)?.discountAmount || 0) / item.qty,
-          modifications: item.modifications?.map((m) => ({
-            modificationId: m.modificationId,
-            price: m.price,
-          })),
+            productDiscount:
+              (itemsWithDiscounts.find((i) => i.id === item.id)?.discountAmount || 0) / item.qty,
+            modifications: item.modifications?.map((m) => ({
+              modificationId: m.modificationId,
+              price: m.price,
+            })),
+            bogoPromotionId: item.promotionType === "BOGO" ? item.promotionId : undefined,
+            productBundleId: item.promotionType === "COMBO" ? item.promotionId : undefined,
+            ...(item.recipientName || item.recipientMobile
+              ? {
+                  notes: `Recipient${item.recipientName ? `: ${item.recipientName}` : ""}${
+                    item.recipientMobile ? ` ${item.recipientMobile}` : ""
+                  }`,
+                }
+              : {}),
           };
-        }),
-      };
-
-      try {
-        const result = await createOrder(payload);
-        const serverOrderId = Number(result.id);
-        saveMenuOpenCheckout({ localSlotId, serverOrderId, fingerprint: fp });
-        if (!isPayNow) {
-          clearOrderById(localSlotId);
-          toast.success("Order submitted successfully");
-          setCheckoutLockedOrderSlotId(null);
-          return { serverOrderId, localSlotId, order: result };
-        }
-        return { serverOrderId, localSlotId, order: result };
-      } catch (err) {
-        setCheckoutLockedOrderSlotId(null);
-        const message =
-          err instanceof AxiosError
-            ? (err.response?.data as { message?: string } | undefined)?.message
-            : err instanceof Error
-              ? err.message
-              : "Unknown error";
-        const networkOrTimeout =
-          err instanceof AxiosError &&
-          (!err.response || err.code === "ECONNABORTED" || err.message === "Network Error");
-        toast.error("Failed to submit order", {
-          description: networkOrTimeout
-            ? `${message ? `${message} ` : ""}If you are unsure, open Orders — the order may still have been created. Do not retry until you check.`.trim()
-            : message,
         });
-        return null;
+
+      const payload: CreateOrderData = isVoucherOnlyOrder
+        ? {
+            customerName: normalizedName,
+            customerMobile: orderDetails.phone,
+            customerId: orderDetails.customerId,
+            totalAmount: total,
+            orderType: "takeaway",
+            orderDiscount: 0,
+            tax: cartTaxAmount,
+            orderNote: activeOrderNote,
+            kitchenNote: activeKitchenNote,
+            order_products: orderProductsPayload,
+          }
+        : {
+            customerName: normalizedName,
+            customerMobile: orderDetails.phone,
+            customerId: orderDetails.customerId,
+            totalAmount: total,
+            orderType: resolvedOrderType,
+            tableNumber: orderDetails.tableNumber,
+            orderDiscount: 0,
+            tax: cartTaxAmount,
+            orderNote: activeOrderNote,
+            kitchenNote: activeKitchenNote,
+            deliveryAddress: orderDetails.deliveryAddress,
+            landmark: orderDetails.landmark,
+            zipcode: orderDetails.zipCode,
+            deliveryInstructions: orderDetails.deliveryInstructions,
+            serviceCharge: serviceChargeAmount,
+            deliveryChargeAmount,
+            deliveryChargeId:
+              orderDetails.orderType === "Delivery" ? (orderDetails.deliveryChargeId ?? null) : null,
+            deliveryChargeSelectedId:
+              orderDetails.orderType === "Delivery" ? (orderDetails.deliveryChargeId ?? null) : null,
+            order_products: orderProductsPayload,
+          };
+
+      const result = await createOrder(payload);
+      const serverOrderId = Number(result.id);
+      saveMenuOpenCheckout({ localSlotId, serverOrderId, fingerprint: fp });
+
+      if (!isPayNow) {
+        clearOrderById(localSlotId);
+        toast.success("Order submitted successfully");
+        setCheckoutLockedOrderSlotId(null);
       }
+      return { serverOrderId, localSlotId, order: result };
+    } catch (err) {
+      setCheckoutLockedOrderSlotId(null);
+      const message =
+        err instanceof AxiosError
+          ? (err.response?.data as { message?: string } | undefined)?.message
+          : err instanceof Error
+            ? err.message
+            : "Unknown error";
+      const networkOrTimeout =
+        err instanceof AxiosError &&
+        (!err.response || err.code === "ECONNABORTED" || err.message === "Network Error");
+      toast.error("Failed to submit order", {
+        description: networkOrTimeout
+          ? `${message ? `${message} ` : ""}If you are unsure, open Orders — the order may still have been created. Do not retry until you check.`.trim()
+          : message,
+      });
+      return null;
     } finally {
       orderSubmitLockRef.current = false;
     }
@@ -434,7 +500,19 @@ export default function OrderSidebar({ onEditItem }: { onEditItem?: (item: Order
 
     if (isOrderAndPaySubmitting || !orderDetails || items.length === 0) return;
 
-    const paymentSnapshot = { customerName: orderDetails.customerName };
+    const paymentSnapshot = { customerName: orderDetails.customerName, customerMobile: orderDetails.phone };
+
+    if (hasMockOnlyItems) {
+      const localSlotId = activeOrderId ?? orders[0]?.id;
+      setPaymentFlow({
+        customerName: paymentSnapshot.customerName,
+        customerMobile: paymentSnapshot.customerMobile,
+        settlementAmount: total,
+        localOrderId: localSlotId ?? undefined,
+      });
+      if (localSlotId) setCheckoutLockedOrderSlotId(localSlotId);
+      return;
+    }
 
     setIsOrderAndPaySubmitting(true);
 
@@ -452,6 +530,7 @@ export default function OrderSidebar({ onEditItem }: { onEditItem?: (item: Order
         }
         const nextPaymentFlow: PaymentFlowState = {
           customerName: paymentSnapshot.customerName,
+          customerMobile: paymentSnapshot.customerMobile,
           settlementAmount: draft.amount,
           orderId: submitted.serverOrderId,
           localOrderId: submitted.localSlotId,
@@ -483,7 +562,10 @@ export default function OrderSidebar({ onEditItem }: { onEditItem?: (item: Order
                 </h2>
                 <button
                   type="button"
-                  onClick={() => setEditOrderId(activeOrderId)}
+                  onClick={() => {
+                    setOrderDetailsModalMode("full");
+                    setEditOrderId(activeOrderId);
+                  }}
                   disabled={hasPendingPayment}
                   className="font-['Arial'] text-xs font-bold uppercase leading-4 text-[#E26522] transition-opacity duration-300 ease-out hover:opacity-70 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:opacity-50"
                 >
@@ -500,69 +582,71 @@ export default function OrderSidebar({ onEditItem }: { onEditItem?: (item: Order
                   <span className="min-w-0 truncate">{orderDetails.phone}</span>
                 </div>
               </div>
-              <div className="flex items-center gap-1.5 border-b border-[#F1F5F9] bg-[#F8FAFC80] px-5 py-1.5">
-                <svg
-                  className="h-4 w-4 shrink-0"
-                  width="16"
-                  height="16"
-                  viewBox="0 0 16 16"
-                  fill="none"
-                  xmlns="http://www.w3.org/2000/svg"
-                >
-                  <path
-                    d="M10 7.33331L9.33337 13.3333"
-                    stroke="#E26522"
-                    strokeWidth="1.33333"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M12.6667 7.33335L10 2.66669"
-                    stroke="#E26522"
-                    strokeWidth="1.33333"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M1.33337 7.33331H14.6667"
-                    stroke="#E26522"
-                    strokeWidth="1.33333"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M2.33337 7.33331L3.40004 12.2666C3.46238 12.5723 3.62994 12.8465 3.87356 13.0414C4.11719 13.2363 4.42145 13.3396 4.73337 13.3333H11.2667C11.5786 13.3396 11.8829 13.2363 12.1265 13.0414C12.3701 12.8465 12.5377 12.5723 12.6 12.2666L13.7334 7.33331"
-                    stroke="#E26522"
-                    strokeWidth="1.33333"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M3 10.3333H13"
-                    stroke="#E26522"
-                    strokeWidth="1.33333"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M3.33337 7.33335L6.00004 2.66669"
-                    stroke="#E26522"
-                    strokeWidth="1.33333"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M6 7.33331L6.66667 13.3333"
-                    stroke="#E26522"
-                    strokeWidth="1.33333"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-                <span className="font-['Arial'] text-sm font-bold leading-5 text-[#E26522]">
-                  {orderDetails.orderType}
-                </span>
-              </div>
+              {!isVoucherOnlyOrder && (
+                <div className="flex items-center gap-1.5 border-b border-[#F1F5F9] bg-[#F8FAFC80] px-5 py-1.5">
+                  <svg
+                    className="h-4 w-4 shrink-0"
+                    width="16"
+                    height="16"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <path
+                      d="M10 7.33331L9.33337 13.3333"
+                      stroke="#E26522"
+                      strokeWidth="1.33333"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    <path
+                      d="M12.6667 7.33335L10 2.66669"
+                      stroke="#E26522"
+                      strokeWidth="1.33333"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    <path
+                      d="M1.33337 7.33331H14.6667"
+                      stroke="#E26522"
+                      strokeWidth="1.33333"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    <path
+                      d="M2.33337 7.33331L3.40004 12.2666C3.46238 12.5723 3.62994 12.8465 3.87356 13.0414C4.11719 13.2363 4.42145 13.3396 4.73337 13.3333H11.2667C11.5786 13.3396 11.8829 13.2363 12.1265 13.0414C12.3701 12.8465 12.5377 12.5723 12.6 12.2666L13.7334 7.33331"
+                      stroke="#E26522"
+                      strokeWidth="1.33333"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    <path
+                      d="M3 10.3333H13"
+                      stroke="#E26522"
+                      strokeWidth="1.33333"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    <path
+                      d="M3.33337 7.33335L6.00004 2.66669"
+                      stroke="#E26522"
+                      strokeWidth="1.33333"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    <path
+                      d="M6 7.33331L6.66667 13.3333"
+                      stroke="#E26522"
+                      strokeWidth="1.33333"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  <span className="font-['Arial'] text-sm font-bold leading-5 text-[#E26522]">
+                    {orderDetails.orderType}
+                  </span>
+                </div>
+              )}
             </>
           ) : (
             <>
@@ -670,13 +754,16 @@ export default function OrderSidebar({ onEditItem }: { onEditItem?: (item: Order
                 itemsWithDiscounts.map((item) => {
                   const variant = item.variant || "";
                   const addOns = item.addOnsList || [];
-                  const hasDiscount = item.discountAmount > 0;
 
                   return (
                     <div
                       key={item.id}
-                      onClick={() => !hasPendingPayment && onEditItem?.(item)}
-                      className={`flex gap-4 rounded-[14px] border border-[#F1F5F9] bg-white px-3 pb-2.5 pt-3 transition-colors ${onEditItem ? "cursor-pointer hover:bg-[#F8FAFC]" : ""}`}
+                      onClick={() => {
+                        if (hasPendingPayment) return;
+                        if (item.promotionType === "BOGO" || item.promotionType === "COMBO") return; // Disable edit for BOGO and Combo offers
+                        onEditItem?.(item);
+                      }}
+                      className={`flex gap-4 rounded-[14px] border border-[#F1F5F9] bg-white px-3 pb-2.5 pt-3 transition-colors ${onEditItem && item.promotionType !== "BOGO" && item.promotionType !== "COMBO" ? "cursor-pointer hover:bg-[#F8FAFC]" : ""}`}
                     >
                       <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-lg bg-zinc-200">
                         <MenuProductImage
@@ -713,19 +800,27 @@ export default function OrderSidebar({ onEditItem }: { onEditItem?: (item: Order
                                 })}
                               </div>
                             )}
+                            {(item.recipientName || item.recipientMobile) && (
+                              <p className="mt-0.5 font-['Arial'] text-[10px] leading-[15px] text-[#62748E]">
+                                Recipient: {item.recipientName || "—"}
+                                {item.recipientMobile ? ` (${item.recipientMobile})` : ""}
+                              </p>
+                            )}
                           </div>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              removeItem(item.id);
-                            }}
-                            disabled={hasPendingPayment}
-                            className="shrink-0 text-[#CAD5E2] hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-[#CAD5E2]"
-                            aria-label="Remove item"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
+                          {!item.isFreeItem && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                removeItem(item.id);
+                              }}
+                              disabled={hasPendingPayment}
+                              className="shrink-0 text-[#CAD5E2] hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-[#CAD5E2]"
+                              aria-label="Remove item"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          )}
                         </div>
                         <div className="mt-1.5 flex items-center justify-between gap-2">
                           <span className="font-['Arial'] text-sm font-bold leading-5 text-[#0F172B]">
@@ -734,33 +829,42 @@ export default function OrderSidebar({ onEditItem }: { onEditItem?: (item: Order
                               minimumFractionDigits: 2,
                             })}
                           </span>
-                          <div className="flex items-center gap-3 rounded-[10px] border border-[#F1F5F9] bg-[#F8FAFC] px-2">
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                updateQty(item.id, -1);
-                              }}
-                              disabled={hasPendingPayment}
-                              className="py-1 text-[#90A1B9] hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-[#90A1B9]"
-                            >
-                              −
-                            </button>
-                            <span className="flex min-w-[16px] items-center justify-center font-['Arial'] text-xs font-black text-[#0A0A0A]">
-                              {item.qty}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                updateQty(item.id, 1);
-                              }}
-                              disabled={hasPendingPayment}
-                              className="py-1 text-[#90A1B9] hover:text-primary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-[#90A1B9]"
-                            >
-                              +
-                            </button>
-                          </div>
+                          {!item.isFreeItem ? (
+                            <div className="flex items-center gap-3 rounded-[10px] border border-[#F1F5F9] bg-[#F8FAFC] px-2">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  updateQty(item.id, -1);
+                                }}
+                                disabled={hasPendingPayment}
+                                className="py-1 text-[#90A1B9] hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-[#90A1B9]"
+                              >
+                                −
+                              </button>
+                              <span className="flex min-w-[16px] items-center justify-center font-['Arial'] text-xs font-black text-[#0A0A0A]">
+                                {item.qty}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  updateQty(item.id, 1);
+                                }}
+                                disabled={hasPendingPayment}
+                                className="py-1 text-[#90A1B9] hover:text-primary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-[#90A1B9]"
+                              >
+                                +
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-1.5 px-2">
+                              <span className="font-['Arial'] text-[10px] font-black tracking-wider text-[#90A1B9] uppercase">QTY:</span>
+                              <span className="font-['Arial'] text-xs font-black text-[#0A0A0A]">
+                                {item.qty}
+                              </span>
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -953,8 +1057,12 @@ export default function OrderSidebar({ onEditItem }: { onEditItem?: (item: Order
       {showModal && (
         <NewOrderDetailsModal
           key={activeOrderId}
+          variant={orderDetailsModalMode === "minimalVoucher" ? "voucherSale" : "full"}
           onSubmit={handleOrderDetailsSubmit}
-          onClose={() => setEditOrderId(null)}
+          onClose={() => {
+            setEditOrderId(null);
+            clearPendingAddsAfterOrderDetails();
+          }}
           initialData={orderDetails}
         />
       )}
@@ -976,6 +1084,7 @@ export default function OrderSidebar({ onEditItem }: { onEditItem?: (item: Order
       {paymentFlow && (
         <ProcessPaymentModal
           customerName={paymentFlow.customerName}
+          customerMobile={paymentFlow.customerMobile ?? orderDetails?.phone}
           amountDue={paymentFlow.settlementAmount}
           orderId={paymentFlow.orderId}
           onClose={() => {
@@ -990,13 +1099,6 @@ export default function OrderSidebar({ onEditItem }: { onEditItem?: (item: Order
         />
       )}
 
-      {!hasDetails && !showModal && (
-        <div
-          className="fixed bottom-0 right-0 z-50 cursor-pointer left-0 md:left-24 min-[1920px]:left-28 min-[2560px]:left-32"
-          style={{ top: "var(--menu-header-height)" }}
-          onClick={() => setEditOrderId(activeOrderId)}
-        />
-      )}
     </>
   );
 }
